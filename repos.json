@@ -2,8 +2,8 @@
   {
     "kernelSource": {
       "name": "NetHunter-GS101-Android16-Pixel6Pro",
-      "repo": "https://github.com/fillwithjoy1/pixel-6-kernel",
-      "branch": "main",
+      "repo": "https://android.googlesource.com/kernel/gs",
+      "branch": "android-gs-raviole-6.1-android16",
       "device": "raven"
     },
     "withKernelSU": true,
