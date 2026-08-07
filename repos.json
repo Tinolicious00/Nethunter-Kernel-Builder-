@@ -29,8 +29,8 @@
       "OBJDUMP": "llvm-objdump",
       "STRIP": "llvm-strip",
       "CROSS_COMPILE": "aarch64-linux-gnu-",
-      "CROSS_COMPILE_ARM32": "arm-linux-gnueabihf-",   // ← fixed
-      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabihf-",  // also fix this if present
+      "CROSS_COMPILE_ARM32": "arm-linux-gnueabihf-",
+      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabihf-",
       "CLANG_TRIPLE": "aarch64-linux-gnu-",
       "LLVM": "1",
       "LLVM_IAS": "1",
