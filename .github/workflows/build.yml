@@ -40,7 +40,6 @@ on:
         type: boolean
 
 jobs:
-  # ---- 1. Parse configuration ----
   parse-config:
     name: "📄 Parse repos.json"
     runs-on: ubuntu-latest
@@ -59,7 +58,6 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           echo "matrix=$(cat ${{ env.CONFIGURATION }} | jq -c .)" >> $GITHUB_OUTPUT
 
-  # ---- 2. Build kernel ----
   build-kernel:
     name: "🐎 ${{ matrix.repos.kernelSource.device }} | ${{ matrix.repos.kernelSource.name }}"
     runs-on: ubuntu-latest
@@ -83,13 +81,11 @@ jobs:
       APPLY_PATCHES: ${{ github.event.inputs.apply_patches == 'true' }}
 
     steps:
-      # ---- 2.1 Clean workspace ----
       - name: "🧹 Clean workspace"
         run: |
           rm -rf ${{ env.kernelDir }}
           mkdir -p ${{ env.kernelDir }}
 
-      # ---- 2.2 Install dependencies ----
       - name: "📦 Install prerequisites"
         run: |
           sudo apt-get update
@@ -98,14 +94,12 @@ jobs:
             libfl-dev python3 python-is-python3 libarchive-tools jq \
             ccache tree
 
-      # ---- 2.3 Get remote commit hash for caching ----
       - name: "🔍 Get remote commit hash"
         id: remote_hash
         run: |
           HASH=$(git ls-remote ${{ env.kernelRepo }} ${{ env.kernelBranch }} | cut -f1)
           echo "hash=$HASH" >> $GITHUB_OUTPUT
 
-      # ---- 2.4 Cache source ----
       - name: "📦 Cache kernel source"
         id: cache-source
         uses: actions/cache@v4
@@ -115,22 +109,16 @@ jobs:
           restore-keys: |
             source-${{ steps.remote_hash.outputs.hash }}-
 
-      # ---- 2.5 Clone or restore source ----
-      - name: "📥 Clone kernel source"
+      - name: "📥 Clone kernel source (if not cached)"
         if: steps.cache-source.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.kernelRepo }}
-          path: ${{ env.kernelDir }}/${{ env.kernelName }}
-          ref: ${{ env.kernelBranch }}
-          fetch-depth: 1
-          submodules: recursive
+        working-directory: ./${{ env.kernelDir }}
+        run: |
+          git clone --recursive --branch ${{ env.kernelBranch }} ${{ env.kernelRepo }} ${{ env.kernelName }} --depth=1
 
       - name: "🔁 Restore source from cache (if hit)"
         if: steps.cache-source.outputs.cache-hit == 'true'
         run: echo "Source restored from cache."
 
-      # ---- 2.6 Generate version from kernel source ----
       - name: "🔖 Generate kernel version"
         id: version
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
@@ -147,7 +135,6 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # ---- 2.7 Cache toolchains ----
       - name: "💾 Cache toolchains"
         id: cache-toolchains
         uses: actions/cache@v4
@@ -159,7 +146,6 @@ jobs:
           restore-keys: |
             toolchains-
 
-      # ---- 2.8 Get toolchains (if not cached) ----
       - name: "🔧 Get toolchains (if not cached)"
         if: steps.cache-toolchains.outputs.cache-hit != 'true'
         working-directory: ./${{ env.kernelDir }}
@@ -184,7 +170,6 @@ jobs:
             fi
           done
 
-      # ---- 2.9 Apply patches ----
       - name: "🩹 Apply custom patches"
         if: ${{ env.APPLY_PATCHES == 'true' }}
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
@@ -198,7 +183,6 @@ jobs:
             done
           fi
 
-      # ---- 2.10 Set build arguments ----
       - name: "⚙️ Set build arguments"
         id: generate-args
         working-directory: ./${{ env.kernelDir }}
@@ -230,7 +214,6 @@ jobs:
             CC="ccache $CC"
           fi
 
-          # Build args
           args="-j$(nproc --all) -s"
           if [ -n "${{ env.OUT_DIR }}" ]; then
             mkdir -p $(pwd)/${{ env.OUT_DIR }}
@@ -250,7 +233,6 @@ jobs:
           extra_params=$(echo $extraParams | jq -r 'to_entries[]? | select(.value != "") | "\(.key)=\(.value)"' | tr "\n" " " | sed 's/ $//')
           echo "args=$args $extra_params" >> $GITHUB_OUTPUT
 
-      # ---- 2.11 KernelSU ----
       - name: "🔀 Update KernelSU"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         if: ${{ env.withKernelSU == 'true' }}
@@ -258,7 +240,6 @@ jobs:
           rm -rf ./KernelSU ./drivers/kernelsu
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
 
-      # ---- 2.12 Defconfig ----
       - name: "📝 Generate defconfig"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         env:
@@ -266,7 +247,6 @@ jobs:
         run: |
           make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
 
-      # ---- 2.13 Inject NetHunter configs ----
       - name: "🏴‍☠️ Inject NetHunter configs"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
@@ -304,7 +284,6 @@ jobs:
           # Resolve dependencies (without -j to avoid warnings)
           make ARCH=${{ env.ARCH }} O=$(pwd) olddefconfig
 
-      # ---- 2.14 Validate config ----
       - name: "✅ Validate kernel config"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
@@ -316,7 +295,6 @@ jobs:
             fi
           done
 
-      # ---- 2.15 Build ----
       - name: "🛠️ Build kernel (Image, modules, dtbs)"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         env:
@@ -326,7 +304,6 @@ jobs:
           make ${args} modules
           make ${args} dtbs || echo "No DTBs to build"
 
-      # ---- 2.16 Package with AnyKernel3 ----
       - name: "📦 Package flashable ZIP"
         run: |
           git clone --depth=1 ${{ env.ANKERNEL3_REPO }} -b ${{ env.ANKERNEL3_BRANCH }} AnyKernel3
@@ -340,7 +317,6 @@ jobs:
           zip -9 -r ../$ZIP_NAME * -x .git README.md
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
-      # ---- 2.17 Upload artifacts ----
       - name: "⬆️ Upload kernel Image"
         uses: actions/upload-artifact@v4
         with:
@@ -365,7 +341,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # ---- 2.18 Build statistics ----
       - name: "📊 Build statistics"
         run: |
           echo "## Build report for ${{ env.kernelDevice }}" >> $GITHUB_STEP_SUMMARY
@@ -377,7 +352,6 @@ jobs:
           echo "- **Modules count**: $(find ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }} -name "*.ko" | wc -l)" >> $GITHUB_STEP_SUMMARY
           echo "- **Build time**: ${{ github.run_duration }}" >> $GITHUB_STEP_SUMMARY
 
-      # ---- 2.19 Create GitHub Release ----
       - name: "🏷️ Create GitHub Release"
         if: ${{ env.RELEASE_TAG != '' && github.event_name == 'workflow_dispatch' }}
         uses: softprops/action-gh-release@v1
@@ -399,7 +373,6 @@ jobs:
             ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
         continue-on-error: true
 
-      # ---- 2.20 Notifications ----
       - name: "📣 Send success notification (Telegram)"
         if: success() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
         uses: appleboy/telegram-action@master
@@ -442,13 +415,10 @@ jobs:
           description: "**Device:** ${{ env.kernelDevice }}\n**Error:** Check logs"
           color: 0xff0000
 
-      # ---- 2.21 Cleanup ----
       - name: "🧹 Cleanup build directories"
         if: always()
         run: |
-          # Remove object files to free space
           rm -rf ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/**/*.o
           rm -rf ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/**/*.cmd
           rm -rf ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/**/built-in.a
-          # Show ccache stats
           ccache -s
