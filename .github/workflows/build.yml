@@ -133,29 +133,46 @@ jobs:
         if: ${{ env.IS_MANIFEST != 'true' && steps.cache-source.outputs.cache-hit == 'true' }}
         run: echo "Source restored from cache."
 
-      # ---- Dynamically locate the kernel root ----
+      # ---- Improved kernel root detection ----
       - name: "📂 Find kernel root"
         id: find_root
         working-directory: ./${{ env.kernelDir }}
         run: |
-          # For manifest, the kernel source is inside a subdirectory (e.g., common/)
-          # Search for the top-level Makefile
-          KERNEL_ROOT=$(find . -maxdepth 3 -name "Makefile" -exec dirname {} \; | head -1)
+          set -e
+          echo "Listing contents of $(pwd):"
+          ls -la
+
+          # Prefer 'common' if it has the defconfig
+          if [ -d "common" ] && [ -f "common/Makefile" ] && [ -f "common/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
+            KERNEL_ROOT="common"
+            echo "Found kernel root in 'common'"
+          else
+            # Search for a directory that contains both Makefile and the defconfig
+            KERNEL_ROOT=""
+            for dir in $(find . -maxdepth 3 -type f -name Makefile -exec dirname {} \; | sort -u); do
+              if [ -f "$dir/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
+                KERNEL_ROOT="$dir"
+                break
+              fi
+            done
+          fi
+
           if [ -z "$KERNEL_ROOT" ]; then
-            echo "❌ Could not find kernel source (Makefile not found)"
+            echo "❌ Could not find kernel source (no directory with Makefile and ${{ env.DEFCONFIG_NAME }})"
             exit 1
           fi
+
           # Remove leading './'
           KERNEL_ROOT=${KERNEL_ROOT#./}
-          echo "Found kernel root: $KERNEL_ROOT"
           echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
           echo "kernel_root=$KERNEL_ROOT" >> $GITHUB_OUTPUT
+          echo "✅ Kernel root found: $KERNEL_ROOT"
 
       - name: "🔍 Verify kernel source"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         run: |
           if [ ! -f "Makefile" ]; then
-            echo "❌ Kernel source invalid: Makefile not found"
+            echo "❌ Kernel source invalid: Makefile not found in $(pwd)"
             exit 1
           fi
           if [ ! -f "arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
@@ -180,11 +197,7 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # ---- The rest of the steps remain unchanged, but use the KERNEL_ROOT environment variable ----
-      # All subsequent steps should use ${{ env.KERNEL_ROOT }} as working directory.
-      # To avoid repetition, we can set the working-directory for each step to ./${{ env.kernelDir }}/${{ env.KERNEL_ROOT }}
-      # But since KERNEL_ROOT is set after some steps, we'll adapt accordingly.
-
+      # ---- Toolchains ----
       - name: "💾 Cache toolchains"
         id: cache-toolchains
         uses: actions/cache@v4
@@ -220,6 +233,7 @@ jobs:
             fi
           done
 
+      # ---- Patches and build ----
       - name: "🩹 Apply custom patches"
         if: ${{ env.APPLY_PATCHES == 'true' }}
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
@@ -263,8 +277,9 @@ jobs:
           fi
 
           args="-j$(nproc --all) -s"
-          # The O= path should be relative to the kernel root, so we'll set it later.
-          # For now, we'll set it relative to the kernel root.
+          # O= path: we want the out directory relative to the kernel root
+          # We'll set it later in the build step, but we'll store it now.
+          # We'll include O=../${{ env.OUT_DIR }} in the args.
           args="$args O=../${{ env.OUT_DIR }}"
           [ -n "$ARCH" ] && args="$args ARCH=$ARCH"
           [ -n "$CROSS_COMPILE" ] && args="$args CROSS_COMPILE=$CROSS_COMPILE"
