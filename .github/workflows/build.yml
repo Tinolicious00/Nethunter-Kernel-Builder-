@@ -8,7 +8,6 @@ env:
   ANYKERNEL3_REPO: "https://github.com/osm0sis/AnyKernel3"
   ANYKERNEL3_BRANCH: "master"
   ARCH: "arm64"
-  # Secrets declared here to avoid lint warnings
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
   DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -81,16 +80,12 @@ jobs:
       CLEAN_BUILD: ${{ github.event.inputs.clean_build == 'true' }}
       APPLY_PATCHES: ${{ github.event.inputs.apply_patches == 'true' }}
       IS_MANIFEST: ${{ matrix.repos.kernelSource.manifest || false }}
-      # Re‑declare to avoid lint warnings (they are already global)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
       ZIP_NAME: ""
 
     steps:
-      # ------------------------------------------------------------
-      # PRE‑BUILD SETUP
-      # ------------------------------------------------------------
       - name: "🧹 Clean workspace"
         run: |
           set -euo pipefail
@@ -106,7 +101,6 @@ jobs:
             build-essential bc curl git zip ftp libssl-dev lftp zstd wget \
             libfl-dev python3 python-is-python3 libarchive-tools jq \
             ccache tree time
-          # Verify critical tools
           for tool in make git ccache jq patch curl; do
             if ! command -v "$tool" >/dev/null 2>&1; then
               echo "❌ Required tool '$tool' not found."
@@ -115,9 +109,6 @@ jobs:
           done
           echo "✅ All prerequisites installed."
 
-      # ------------------------------------------------------------
-      # SOURCE FETCHING
-      # ------------------------------------------------------------
       - name: "🔄 Install repo tool"
         if: ${{ env.IS_MANIFEST == 'true' }}
         run: |
@@ -181,7 +172,7 @@ jobs:
         run: echo "✅ Source restored from cache."
 
       # ------------------------------------------------------------
-      # IMPROVED KERNEL ROOT DETECTION
+      # IMPROVED KERNEL ROOT DETECTION (now searches for defconfig anywhere)
       # ------------------------------------------------------------
       - name: "📂 Find kernel root"
         id: find_root
@@ -194,53 +185,69 @@ jobs:
           DEFCONFIG="${{ env.DEFCONFIG_NAME }}"
           echo "Looking for defconfig: $DEFCONFIG"
 
-          # Candidates: kernel, common, gs
-          CANDIDATES=("kernel" "common" "gs")
-          KERNEL_ROOT=""
-          for candidate in "${CANDIDATES[@]}"; do
-            if [ -d "$candidate" ] && [ -f "$candidate/Makefile" ]; then
-              # Check if defconfig exists in the usual place
-              if [ -f "$candidate/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
-                KERNEL_ROOT="$candidate"
-                echo "Found kernel root in '$candidate' (Makefile + defconfig)"
-                break
-              else
-                echo "Candidate '$candidate' has Makefile but not defconfig, searching deeper..."
-                # Look for defconfig anywhere under this candidate
-                DEFCONFIG_PATH=$(find "$candidate" -path "*/arch/${{ env.ARCH }}/configs/$DEFCONFIG" | head -1)
-                if [ -n "$DEFCONFIG_PATH" ]; then
-                  # The root is the directory that contains arch/
-                  KERNEL_ROOT=$(dirname "$(dirname "$(dirname "$DEFCONFIG_PATH")")")
-                  echo "Found defconfig at $DEFCONFIG_PATH, root set to $KERNEL_ROOT"
-                  break
-                fi
-              fi
+          # First, print contents of likely directories for debugging
+          for dir in kernel common gs aosp; do
+            if [ -d "$dir" ]; then
+              echo "Contents of $dir:"
+              ls -la "$dir" 2>/dev/null || echo "  (cannot list)"
             fi
           done
 
-          if [ -z "$KERNEL_ROOT" ]; then
-            # Last resort: find any directory with Makefile and arch/
-            for dir in $(find . -maxdepth 3 -type f -name Makefile -exec dirname {} \; | sort -u); do
-              if [ -d "$dir/arch/${{ env.ARCH }}/configs" ]; then
-                if [ -f "$dir/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
-                  KERNEL_ROOT="$dir"
-                  echo "Found kernel root via fallback: $dir"
+          # Search for the defconfig file anywhere
+          echo "Searching for $DEFCONFIG..."
+          DEFCONFIG_PATHS=$(find . -type f -name "$DEFCONFIG" 2>/dev/null || true)
+          if [ -z "$DEFCONFIG_PATHS" ]; then
+            echo "❌ Defconfig $DEFCONFIG not found anywhere in $(pwd)"
+            echo "Full directory tree:"
+            tree . || find . -type d | sort
+            exit 1
+          fi
+          echo "Found defconfig at:"
+          echo "$DEFCONFIG_PATHS"
+
+          # For each match, determine the potential kernel root
+          KERNEL_ROOT=""
+          for path in $DEFCONFIG_PATHS; do
+            # The path should be something like ./common/arch/arm64/configs/ravioledefconfig
+            # We want the directory that contains 'arch/'
+            # So we go up until we find a directory that has arch/ and contains Makefile
+            # Start from the directory containing the defconfig
+            current_dir=$(dirname "$path")
+            while [ "$current_dir" != "." ] && [ "$current_dir" != "/" ]; do
+              # Check if this directory has arch/ and Makefile
+              if [ -d "$current_dir/arch" ] && [ -f "$current_dir/Makefile" ]; then
+                # Also ensure arch/$ARCH/configs/defconfig exists (it should, since we found it)
+                if [ -f "$current_dir/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
+                  KERNEL_ROOT="$current_dir"
                   break
-                else
-                  echo "Directory $dir has arch/ but not $DEFCONFIG, skipping."
                 fi
+              fi
+              current_dir=$(dirname "$current_dir")
+            done
+            if [ -n "$KERNEL_ROOT" ]; then
+              break
+            fi
+          done
+
+          # If still not found, try a simpler approach: look for any directory containing both Makefile and arch/$ARCH/configs/
+          if [ -z "$KERNEL_ROOT" ]; then
+            echo "Falling back to searching for directories with Makefile and arch/"
+            for dir in $(find . -maxdepth 4 -type f -name Makefile -exec dirname {} \; | sort -u); do
+              if [ -d "$dir/arch/${{ env.ARCH }}/configs" ] && [ -f "$dir/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
+                KERNEL_ROOT="$dir"
+                echo "Found root via fallback: $dir"
+                break
               fi
             done
           fi
 
+          # If we have a root, verify and set it
           if [ -z "$KERNEL_ROOT" ]; then
-            echo "❌ Could not find kernel source (no directory with Makefile and $DEFCONFIG)"
-            echo "Directory structure (max depth 3):"
-            find . -maxdepth 3 -type d | sort
-            echo "Searching for any Makefile:"
-            find . -name Makefile
-            echo "Searching for defconfig:"
-            find . -name "$DEFCONFIG"
+            echo "❌ Could not determine kernel root."
+            echo "List of directories containing Makefile:"
+            find . -name Makefile -exec dirname {} \; | sort -u
+            echo "List of directories containing arch/${{ env.ARCH }}/configs/$DEFCONFIG:"
+            find . -path "*/arch/${{ env.ARCH }}/configs/$DEFCONFIG" -exec dirname {} \; | sort -u
             exit 1
           fi
 
@@ -264,9 +271,7 @@ jobs:
           fi
           echo "✅ Kernel source looks valid."
 
-      # ------------------------------------------------------------
-      # VERSIONING
-      # ------------------------------------------------------------
+      # ---- Continue with the rest of the steps (unchanged) ----
       - name: "🔖 Generate kernel version"
         id: version
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
@@ -290,9 +295,6 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "✅ Version: $VERSION"
 
-      # ------------------------------------------------------------
-      # TOOLCHAINS
-      # ------------------------------------------------------------
       - name: "💾 Cache toolchains"
         id: cache-toolchains
         uses: actions/cache@v4
@@ -333,9 +335,6 @@ jobs:
           done
           echo "✅ Toolchains added to PATH."
 
-      # ------------------------------------------------------------
-      # PATCHES
-      # ------------------------------------------------------------
       - name: "🩹 Apply custom patches"
         if: ${{ env.APPLY_PATCHES == 'true' }}
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
@@ -352,9 +351,6 @@ jobs:
           fi
           echo "✅ Patches applied (if any)."
 
-      # ------------------------------------------------------------
-      # BUILD ARGUMENTS
-      # ------------------------------------------------------------
       - name: "⚙️ Set build arguments"
         id: generate-args
         working-directory: ./${{ env.kernelDir }}
@@ -377,7 +373,6 @@ jobs:
           echo "ARCH=$ARCH" >> $GITHUB_ENV
           echo "TARGET=$TARGET" >> $GITHUB_ENV
 
-          # Enable ccache if available and not clean build
           if command -v ccache >/dev/null 2>&1 && [ "${{ env.CLEAN_BUILD }}" != "true" ]; then
             export CCACHE_DIR="${{ env.CCACHE_DIR }}"
             export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
@@ -388,7 +383,6 @@ jobs:
             echo "⚠️ ccache not used (clean build or missing)."
           fi
 
-          # Build args
           args="-j$(nproc --all) -s"
           args="$args O=../${{ env.OUT_DIR }}"
           [ -n "$ARCH" ] && args="$args ARCH=$ARCH"
@@ -403,7 +397,6 @@ jobs:
           fi
           echo "args=$args $extra_params" >> $GITHUB_OUTPUT
 
-          # Export all tool variables
           echo "CC=$CC" >> $GITHUB_ENV
           echo "LD=$LD" >> $GITHUB_ENV
           echo "AR=$AR" >> $GITHUB_ENV
@@ -414,9 +407,6 @@ jobs:
           echo "LLVM=$LLVM" >> $GITHUB_ENV
           echo "LLVM_IAS=$LLVM_IAS" >> $GITHUB_ENV
 
-      # ------------------------------------------------------------
-      # KERNELSU
-      # ------------------------------------------------------------
       - name: "🔀 Update KernelSU"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         if: ${{ env.withKernelSU == 'true' }}
@@ -426,9 +416,6 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           echo "✅ KernelSU integrated."
 
-      # ------------------------------------------------------------
-      # CONFIG AND BUILD
-      # ------------------------------------------------------------
       - name: "📝 Generate defconfig"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         env:
@@ -528,9 +515,6 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "✅ Flashable ZIP created: $ZIP_NAME"
 
-      # ------------------------------------------------------------
-      # UPLOAD ARTIFACTS
-      # ------------------------------------------------------------
       - name: "⬆️ Upload kernel Image"
         uses: actions/upload-artifact@v4
         with:
@@ -555,9 +539,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # ------------------------------------------------------------
-      # ON‑FAILURE DEBUG UPLOAD
-      # ------------------------------------------------------------
       - name: "📤 Upload debug info on failure"
         if: failure()
         run: |
@@ -579,9 +560,6 @@ jobs:
           path: debug.tar.gz
           retention-days: 7
 
-      # ------------------------------------------------------------
-      # BUILD STATISTICS
-      # ------------------------------------------------------------
       - name: "📊 Build statistics"
         if: success()
         run: |
@@ -597,9 +575,6 @@ jobs:
           echo "- **Build duration**: ${BUILD_DURATION:-unknown} seconds" >> $GITHUB_STEP_SUMMARY
           ccache -s >> $GITHUB_STEP_SUMMARY
 
-      # ------------------------------------------------------------
-      # GITHUB RELEASE
-      # ------------------------------------------------------------
       - name: "🏷️ Create GitHub Release"
         if: ${{ env.RELEASE_TAG != '' && github.event_name == 'workflow_dispatch' && success() }}
         uses: softprops/action-gh-release@v1
@@ -621,9 +596,6 @@ jobs:
             ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
         continue-on-error: true
 
-      # ------------------------------------------------------------
-      # NOTIFICATIONS
-      # ------------------------------------------------------------
       - name: "📣 Send success notification (Telegram)"
         if: success() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
         uses: appleboy/telegram-action@master
@@ -666,9 +638,6 @@ jobs:
           description: "**Device:** ${{ env.kernelDevice }}\n**Error:** Check logs"
           color: 0xff0000
 
-      # ------------------------------------------------------------
-      # CLEANUP
-      # ------------------------------------------------------------
       - name: "🧹 Cleanup build directories"
         if: always()
         run: |
