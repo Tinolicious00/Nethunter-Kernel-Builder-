@@ -8,6 +8,10 @@ env:
   ANYKERNEL3_REPO: "https://github.com/osm0sis/AnyKernel3"
   ANYKERNEL3_BRANCH: "master"
   ARCH: "arm64"
+  # Secrets declared here to avoid lint warnings
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
 on:
   workflow_dispatch:
@@ -50,10 +54,11 @@ jobs:
       - name: "📊 Generate Matrix"
         id: generate-matrix
         run: |
+          set -euo pipefail
           echo "repos<<EOF" >> $GITHUB_OUTPUT
-          cat ${{ env.CONFIGURATION }} >> $GITHUB_OUTPUT
+          cat "${{ env.CONFIGURATION }}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "matrix=$(cat ${{ env.CONFIGURATION }} | jq -c .)" >> $GITHUB_OUTPUT
+          echo "matrix=$(cat "${{ env.CONFIGURATION }}" | jq -c .)" >> $GITHUB_OUTPUT
 
   build-kernel:
     name: "🐎 ${{ matrix.repos.kernelSource.device }} | ${{ matrix.repos.kernelSource.name }}"
@@ -76,44 +81,85 @@ jobs:
       CLEAN_BUILD: ${{ github.event.inputs.clean_build == 'true' }}
       APPLY_PATCHES: ${{ github.event.inputs.apply_patches == 'true' }}
       IS_MANIFEST: ${{ matrix.repos.kernelSource.manifest || false }}
+      # Re‑declare for lint
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      ZIP_NAME: ""
 
     steps:
+      # ------------------------------------------------------------
+      # PRE‑BUILD SETUP
+      # ------------------------------------------------------------
       - name: "🧹 Clean workspace"
         run: |
-          rm -rf ${{ env.kernelDir }}
-          mkdir -p ${{ env.kernelDir }}
+          set -euo pipefail
+          rm -rf "${{ env.kernelDir }}"
+          mkdir -p "${{ env.kernelDir }}"
+          echo "Workspace cleaned."
 
       - name: "📦 Install prerequisites"
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc curl git zip ftp libssl-dev lftp zstd wget \
             libfl-dev python3 python-is-python3 libarchive-tools jq \
-            ccache tree
+            ccache tree time
+          # Verify critical tools
+          for tool in make git ccache jq patch curl; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "❌ Required tool '$tool' not found."
+              exit 1
+            fi
+          done
+          echo "✅ All prerequisites installed."
 
-      # ---- For manifest repos, install repo and sync ----
+      # ------------------------------------------------------------
+      # SOURCE FETCHING
+      # ------------------------------------------------------------
       - name: "🔄 Install repo tool"
         if: ${{ env.IS_MANIFEST == 'true' }}
         run: |
+          set -euo pipefail
           curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
           chmod a+x /usr/local/bin/repo
+          # Verify repo works
+          repo --version
+          echo "✅ repo installed."
 
-      - name: "📥 Sync manifest source (repo)"
+      - name: "📥 Sync manifest source (repo) – with retry"
         if: ${{ env.IS_MANIFEST == 'true' }}
         working-directory: ./${{ env.kernelDir }}
         run: |
-          repo init -u ${{ env.kernelRepo }} -b ${{ env.kernelBranch }} --depth=1
-          repo sync -c -j$(nproc) --no-tags
+          set -euo pipefail
+          for attempt in {1..3}; do
+            echo "Attempt $attempt to sync manifest..."
+            repo init -u "${{ env.kernelRepo }}" -b "${{ env.kernelBranch }}" --depth=1
+            repo sync -c -j$(nproc) --no-tags && break
+            if [ $attempt -eq 3 ]; then
+              echo "❌ repo sync failed after 3 attempts."
+              exit 1
+            fi
+            echo "Retrying in 10 seconds..."
+            sleep 10
+          done
+          echo "✅ repo sync completed successfully."
 
-      # ---- For non-manifest: clone/cache ----
-      - name: "🔍 Get remote commit hash (non-manifest)"
+      - name: "🔍 Get remote commit hash (non‑manifest)"
         id: remote_hash
         if: ${{ env.IS_MANIFEST != 'true' }}
         run: |
-          HASH=$(git ls-remote ${{ env.kernelRepo }} ${{ env.kernelBranch }} | cut -f1)
+          set -euo pipefail
+          HASH=$(git ls-remote "${{ env.kernelRepo }}" "${{ env.kernelBranch }}" | cut -f1)
+          if [ -z "$HASH" ]; then
+            echo "❌ Could not get remote commit hash for ${{ env.kernelRepo }} branch ${{ env.kernelBranch }}"
+            exit 1
+          fi
           echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "✅ Remote hash: $HASH"
 
-      - name: "📦 Cache kernel source (non-manifest)"
+      - name: "📦 Cache kernel source (non‑manifest)"
         id: cache-source
         if: ${{ env.IS_MANIFEST != 'true' }}
         uses: actions/cache@v4
@@ -123,32 +169,41 @@ jobs:
           restore-keys: |
             source-${{ steps.remote_hash.outputs.hash }}-
 
-      - name: "📥 Clone kernel source (non-manifest, if not cached)"
+      - name: "📥 Clone kernel source (non‑manifest, if not cached)"
         if: ${{ env.IS_MANIFEST != 'true' && steps.cache-source.outputs.cache-hit != 'true' }}
         working-directory: ./${{ env.kernelDir }}
         run: |
-          git clone --recursive --branch ${{ env.kernelBranch }} ${{ env.kernelRepo }} ${{ matrix.repos.kernelSource.name }} --depth=1
+          set -euo pipefail
+          git clone --recursive --branch "${{ env.kernelBranch }}" "${{ env.kernelRepo }}" "${{ matrix.repos.kernelSource.name }}" --depth=1
+          echo "✅ Kernel source cloned."
 
-      - name: "🔁 Restore source from cache (non-manifest)"
+      - name: "🔁 Restore source from cache (non‑manifest)"
         if: ${{ env.IS_MANIFEST != 'true' && steps.cache-source.outputs.cache-hit == 'true' }}
-        run: echo "Source restored from cache."
+        run: echo "✅ Source restored from cache."
 
-      # ---- Improved kernel root detection ----
+      # ------------------------------------------------------------
+      # KERNEL ROOT DETECTION
+      # ------------------------------------------------------------
       - name: "📂 Find kernel root"
         id: find_root
         working-directory: ./${{ env.kernelDir }}
         run: |
-          set -e
+          set -euo pipefail
           echo "Listing contents of $(pwd):"
           ls -la
 
-          # Prefer 'common' if it has the defconfig
-          if [ -d "common" ] && [ -f "common/Makefile" ] && [ -f "common/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
-            KERNEL_ROOT="common"
-            echo "Found kernel root in 'common'"
-          else
-            # Search for a directory that contains both Makefile and the defconfig
-            KERNEL_ROOT=""
+          # Define candidates: common, kernel, gs, then search deeper
+          CANDIDATES=("common" "kernel" "gs")
+          KERNEL_ROOT=""
+          for candidate in "${CANDIDATES[@]}"; do
+            if [ -d "$candidate" ] && [ -f "$candidate/Makefile" ] && [ -f "$candidate/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
+              KERNEL_ROOT="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$KERNEL_ROOT" ]; then
+            # Search for any directory containing both Makefile and the defconfig
             for dir in $(find . -maxdepth 3 -type f -name Makefile -exec dirname {} \; | sort -u); do
               if [ -f "$dir/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
                 KERNEL_ROOT="$dir"
@@ -159,6 +214,8 @@ jobs:
 
           if [ -z "$KERNEL_ROOT" ]; then
             echo "❌ Could not find kernel source (no directory with Makefile and ${{ env.DEFCONFIG_NAME }})"
+            echo "Directory structure:"
+            find . -maxdepth 3 -type d | sort
             exit 1
           fi
 
@@ -171,6 +228,7 @@ jobs:
       - name: "🔍 Verify kernel source"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         run: |
+          set -euo pipefail
           if [ ! -f "Makefile" ]; then
             echo "❌ Kernel source invalid: Makefile not found in $(pwd)"
             exit 1
@@ -181,23 +239,36 @@ jobs:
           fi
           echo "✅ Kernel source looks valid."
 
+      # ------------------------------------------------------------
+      # VERSIONING
+      # ------------------------------------------------------------
       - name: "🔖 Generate kernel version"
         id: version
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         run: |
+          set -euo pipefail
           if [ -n "${{ env.RELEASE_TAG }}" ]; then
             VERSION="${{ env.RELEASE_TAG }}"
           else
-            COMMIT_COUNT=$(git rev-list --count HEAD)
-            COMMIT_HASH=$(git rev-parse --short HEAD)
-            VERSION="build-${COMMIT_COUNT}-g${COMMIT_HASH}"
+            # Try git describe, fallback to commit hash + date
+            if git describe --always --tags --dirty >/dev/null 2>&1; then
+              VERSION=$(git describe --always --tags --dirty)
+            else
+              COMMIT_HASH=$(git rev-parse --short HEAD)
+              DATE=$(date +%Y%m%d)
+              VERSION="build-${DATE}-g${COMMIT_HASH}"
+            fi
           fi
           if [ "${{ env.BUILD_TYPE }}" != "release" ]; then
             VERSION="${VERSION}-${{ env.BUILD_TYPE }}"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "✅ Version: $VERSION"
 
-      # ---- Toolchains ----
+      # ------------------------------------------------------------
+      # TOOLCHAINS
+      # ------------------------------------------------------------
       - name: "💾 Cache toolchains"
         id: cache-toolchains
         uses: actions/cache@v4
@@ -215,38 +286,51 @@ jobs:
         env:
           toolchains: "${{ toJSON(matrix.repos.toolchains) }}"
         run: |
+          set -euo pipefail
           toolchains_num="$(echo $toolchains | jq 'length')"
           for ((i=0;i<toolchains_num;i++)); do
             name=$(echo $toolchains | jq -r ".[$i].name")
             repo=$(echo $toolchains | jq -r ".[$i].repo")
             branch=$(echo $toolchains | jq -r ".[$i].branch")
-            git clone --recursive --branch $branch $repo $name --depth=1
+            echo "Cloning $name from $repo branch $branch"
+            git clone --recursive --branch "$branch" "$repo" "$name" --depth=1
           done
+          echo "✅ Toolchains downloaded."
 
       - name: "🌳 Add toolchains to PATH"
         working-directory: ./${{ env.kernelDir }}
         run: |
+          set -euo pipefail
           for dir in clang gas; do
             if [ -d "$dir" ]; then
               echo "$(pwd)/$dir/" >> $GITHUB_PATH
               echo "$(pwd)/$dir/bin" >> $GITHUB_PATH
             fi
           done
+          echo "✅ Toolchains added to PATH."
 
-      # ---- Patches and build ----
+      # ------------------------------------------------------------
+      # PATCHES
+      # ------------------------------------------------------------
       - name: "🩹 Apply custom patches"
         if: ${{ env.APPLY_PATCHES == 'true' }}
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         run: |
-          set -e
+          set -euo pipefail
           PATCH_DIR="${{ github.workspace }}/patches"
           if [ -d "$PATCH_DIR" ]; then
             for patch in $(find "$PATCH_DIR" -name "*.patch" | sort); do
               echo "Applying $patch"
-              patch -p1 < "$patch"
+              patch -p1 < "$patch" || { echo "❌ Patch $patch failed"; exit 1; }
             done
+          else
+            echo "No patches folder found, skipping."
           fi
+          echo "✅ Patches applied (if any)."
 
+      # ------------------------------------------------------------
+      # BUILD ARGUMENTS
+      # ------------------------------------------------------------
       - name: "⚙️ Set build arguments"
         id: generate-args
         working-directory: ./${{ env.kernelDir }}
@@ -254,32 +338,34 @@ jobs:
           params: "${{ toJSON(matrix.repos.params) }}"
           extraParams: "${{ toJSON(matrix.repos.extraParams) }}"
         run: |
-          ARCH=$(echo $params | jq -r ".ARCH // empty")
-          CROSS_COMPILE=$(echo $params | jq -r ".CROSS_COMPILE // empty")
-          CROSS_COMPILE_COMPAT=$(echo $params | jq -r ".CROSS_COMPILE_COMPAT // empty")
-          CLANG_TRIPLE=$(echo $params | jq -r ".CLANG_TRIPLE // empty")
-          AR=$(echo $params | jq -r ".AR // empty")
-          CC=$(echo $params | jq -r ".CC // empty")
-          LD=$(echo $params | jq -r ".LD // empty")
-          LLVM=$(echo $params | jq -r ".LLVM // empty")
-          LLVM_IAS=$(echo $params | jq -r ".LLVM_IAS // empty")
-          TARGET=$(echo $params | jq -r ".TARGET // empty")
+          set -euo pipefail
+          ARCH=$(echo "$params" | jq -r ".ARCH // empty")
+          CROSS_COMPILE=$(echo "$params" | jq -r ".CROSS_COMPILE // empty")
+          CROSS_COMPILE_COMPAT=$(echo "$params" | jq -r ".CROSS_COMPILE_COMPAT // empty")
+          CLANG_TRIPLE=$(echo "$params" | jq -r ".CLANG_TRIPLE // empty")
+          AR=$(echo "$params" | jq -r ".AR // empty")
+          CC=$(echo "$params" | jq -r ".CC // empty")
+          LD=$(echo "$params" | jq -r ".LD // empty")
+          LLVM=$(echo "$params" | jq -r ".LLVM // empty")
+          LLVM_IAS=$(echo "$params" | jq -r ".LLVM_IAS // empty")
+          TARGET=$(echo "$params" | jq -r ".TARGET // empty")
 
           echo "ARCH=$ARCH" >> $GITHUB_ENV
           echo "TARGET=$TARGET" >> $GITHUB_ENV
 
-          # Use ccache if available and not clean build
-          if command -v ccache >/dev/null && [ "${{ env.CLEAN_BUILD }}" != "true" ]; then
+          # Enable ccache if available and not clean build
+          if command -v ccache >/dev/null 2>&1 && [ "${{ env.CLEAN_BUILD }}" != "true" ]; then
             export CCACHE_DIR="${{ env.CCACHE_DIR }}"
             export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
             ccache -z
             CC="ccache $CC"
+            echo "✅ ccache enabled."
+          else
+            echo "⚠️ ccache not used (clean build or missing)."
           fi
 
+          # Build args
           args="-j$(nproc --all) -s"
-          # O= path: we want the out directory relative to the kernel root
-          # We'll set it later in the build step, but we'll store it now.
-          # We'll include O=../${{ env.OUT_DIR }} in the args.
           args="$args O=../${{ env.OUT_DIR }}"
           [ -n "$ARCH" ] && args="$args ARCH=$ARCH"
           [ -n "$CROSS_COMPILE" ] && args="$args CROSS_COMPILE=$CROSS_COMPILE"
@@ -287,14 +373,13 @@ jobs:
           [ -n "$CROSS_COMPILE_COMPAT" ] && args="$args CROSS_COMPILE_ARM32=$CROSS_COMPILE_COMPAT"
           [ -n "$TARGET" ] && args="$args $TARGET"
 
-          # Handle extraParams safely
           extra_params=""
           if [ -n "$extraParams" ] && [ "$extraParams" != "null" ]; then
-            extra_params=$(echo $extraParams | jq -r 'to_entries[]? | select(.value != "") | "\(.key)=\(.value)"' | tr "\n" " " | sed 's/ $//')
+            extra_params=$(echo "$extraParams" | jq -r 'to_entries[]? | select(.value != "") | "\(.key)=\(.value)"' | tr "\n" " " | sed 's/ $//')
           fi
           echo "args=$args $extra_params" >> $GITHUB_OUTPUT
 
-          # Export toolchain variables for the build steps
+          # Export all tool variables
           echo "CC=$CC" >> $GITHUB_ENV
           echo "LD=$LD" >> $GITHUB_ENV
           echo "AR=$AR" >> $GITHUB_ENV
@@ -305,23 +390,34 @@ jobs:
           echo "LLVM=$LLVM" >> $GITHUB_ENV
           echo "LLVM_IAS=$LLVM_IAS" >> $GITHUB_ENV
 
+      # ------------------------------------------------------------
+      # KERNELSU
+      # ------------------------------------------------------------
       - name: "🔀 Update KernelSU"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         if: ${{ env.withKernelSU == 'true' }}
         run: |
+          set -euo pipefail
           rm -rf ./KernelSU ./drivers/kernelsu
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          echo "✅ KernelSU integrated."
 
+      # ------------------------------------------------------------
+      # CONFIG AND BUILD
+      # ------------------------------------------------------------
       - name: "📝 Generate defconfig"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
+          set -euo pipefail
           make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
+          echo "✅ Defconfig generated."
 
       - name: "🏴‍☠️ Inject NetHunter configs"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         run: |
+          set -euo pipefail
           cd ../${{ env.OUT_DIR }}
           cat << 'EOF' >> .config
           CONFIG_OF_CONFIGFS=y
@@ -353,42 +449,70 @@ jobs:
           CONFIG_CRYPTO_USER_API_AEAD=y
           CONFIG_CRYPTO_USER_API_RNG=y
           EOF
-          # Resolve dependencies (without -j to avoid warnings)
+          # Resolve dependencies
           make ARCH=${{ env.ARCH }} O=$(pwd) olddefconfig
+          echo "✅ NetHunter configs injected."
 
       - name: "✅ Validate kernel config"
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         run: |
+          set -euo pipefail
           cd ../${{ env.OUT_DIR }}
           REQUIRED_CONFIGS="CONFIG_KPROBES CONFIG_NETFILTER CONFIG_USB_GADGET"
+          missing=0
           for cfg in $REQUIRED_CONFIGS; do
             if ! grep -q "^$cfg=y" .config; then
               echo "⚠️ Warning: $cfg is not set, NetHunter may be incomplete"
+              missing=1
             fi
           done
+          [ $missing -eq 0 ] && echo "✅ All required configs are set."
 
       - name: "🛠️ Build kernel (Image, modules, dtbs)"
+        id: build
         working-directory: ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          make ${args}
-          make ${args} modules
-          make ${args} dtbs || echo "No DTBs to build"
+          set -euo pipefail
+          # Record start time
+          START=$(date +%s)
+          # Build Image
+          time make ${args}
+          # Build modules
+          time make ${args} modules
+          # Build dtbs (optional)
+          time make ${args} dtbs || echo "No DTBs to build"
+          # Record end time
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "BUILD_DURATION=$DURATION" >> $GITHUB_ENV
+          echo "✅ Kernel built in ${DURATION} seconds."
 
       - name: "📦 Package flashable ZIP"
+        id: package
         run: |
-          git clone --depth=1 ${{ env.ANKERNEL3_REPO }} -b ${{ env.ANKERNEL3_BRANCH }} AnyKernel3
-          cp ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image AnyKernel3/
-          [ -f ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb ] && cp ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb AnyKernel3/
-          [ -f ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img ] && cp ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img AnyKernel3/
+          set -euo pipefail
+          git clone --depth=1 "${{ env.ANKERNEL3_REPO }}" -b "${{ env.ANKERNEL3_BRANCH }}" AnyKernel3
+          IMAGE_PATH="./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
+          if [ ! -f "$IMAGE_PATH" ]; then
+            echo "❌ Image not found at $IMAGE_PATH"
+            exit 1
+          fi
+          cp "$IMAGE_PATH" AnyKernel3/
+          [ -f "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb" ] && cp "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb" AnyKernel3/
+          [ -f "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img" ] && cp "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img" AnyKernel3/
           cd AnyKernel3
           sed -i "s/device.name1=.*/device.name1=${{ env.kernelDevice }}/" anykernel.sh
           sed -i "s/device.name2=.*/device.name2=${{ env.kernelDevice }}/" anykernel.sh
           ZIP_NAME="${{ env.kernelDevice }}-NetHunter-Kernel-${{ steps.version.outputs.version }}.zip"
-          zip -9 -r ../$ZIP_NAME * -x .git README.md
+          zip -9 -r ../"$ZIP_NAME" * -x .git README.md
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "✅ Flashable ZIP created: $ZIP_NAME"
 
+      # ------------------------------------------------------------
+      # UPLOAD ARTIFACTS
+      # ------------------------------------------------------------
       - name: "⬆️ Upload kernel Image"
         uses: actions/upload-artifact@v4
         with:
@@ -413,19 +537,59 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: "📊 Build statistics"
+      # ------------------------------------------------------------
+      # ON‑FAILURE DEBUG UPLOAD
+      # ------------------------------------------------------------
+      - name: "📤 Upload debug info on failure"
+        if: failure()
         run: |
+          set -euo pipefail
+          mkdir -p debug
+          # Copy kernel config and logs
+          if [ -f "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/.config" ]; then
+            cp "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/.config" debug/
+          fi
+          # Find and copy any log files
+          find ./${{ env.kernelDir }} -name "*.log" -exec cp {} debug/ \; 2>/dev/null || true
+          # Save directory tree
+          tree ./${{ env.kernelDir }} > debug/tree.txt 2>/dev/null || ls -laR ./${{ env.kernelDir }} > debug/tree.txt
+          # Compress
+          tar -czf debug.tar.gz debug/
+        continue-on-error: true
+
+      - name: "⬆️ Upload debug archive"
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ env.kernelDevice }}
+          path: debug.tar.gz
+          retention-days: 7
+
+      # ------------------------------------------------------------
+      # BUILD STATISTICS
+      # ------------------------------------------------------------
+      - name: "📊 Build statistics"
+        if: success()
+        run: |
+          set -euo pipefail
           echo "## Build report for ${{ env.kernelDevice }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Kernel version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Build type**: ${{ env.BUILD_TYPE }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Defconfig**: ${{ env.DEFCONFIG_NAME }}" >> $GITHUB_STEP_SUMMARY
           echo "- **KernelSU**: ${{ env.withKernelSU }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Image size**: $(du -h ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image | cut -f1)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Modules count**: $(find ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }} -name "*.ko" | wc -l)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Build time**: ${{ github.run_duration }}" >> $GITHUB_STEP_SUMMARY
+          MOD_COUNT=$(find ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }} -name "*.ko" | wc -l)
+          echo "- **Modules count**: $MOD_COUNT" >> $GITHUB_STEP_SUMMARY
+          # Build duration from env set earlier
+          echo "- **Build duration**: ${BUILD_DURATION:-unknown} seconds" >> $GITHUB_STEP_SUMMARY
+          # ccache stats
+          ccache -s >> $GITHUB_STEP_SUMMARY
 
+      # ------------------------------------------------------------
+      # GITHUB RELEASE
+      # ------------------------------------------------------------
       - name: "🏷️ Create GitHub Release"
-        if: ${{ env.RELEASE_TAG != '' && github.event_name == 'workflow_dispatch' }}
+        if: ${{ env.RELEASE_TAG != '' && github.event_name == 'workflow_dispatch' && success() }}
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.RELEASE_TAG }}
@@ -445,6 +609,9 @@ jobs:
             ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
         continue-on-error: true
 
+      # ------------------------------------------------------------
+      # NOTIFICATIONS
+      # ------------------------------------------------------------
       - name: "📣 Send success notification (Telegram)"
         if: success() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
         uses: appleboy/telegram-action@master
@@ -487,9 +654,13 @@ jobs:
           description: "**Device:** ${{ env.kernelDevice }}\n**Error:** Check logs"
           color: 0xff0000
 
+      # ------------------------------------------------------------
+      # CLEANUP
+      # ------------------------------------------------------------
       - name: "🧹 Cleanup build directories"
         if: always()
         run: |
+          set -euo pipefail
           rm -rf ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/**/*.o
           rm -rf ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/**/*.cmd
           rm -rf ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/**/built-in.a
