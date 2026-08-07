@@ -2,9 +2,10 @@
   {
     "kernelSource": {
       "name": "NetHunter-GS101-Android16-Pixel6Pro",
-      "repo": "https://android.googlesource.com/kernel/devices/google/raviole",
+      "repo": "https://android.googlesource.com/kernel/manifest",
       "branch": "android-gs-raviole-6.1-android16",
-      "device": "raven"
+      "device": "raven",
+      "manifest": true
     },
     "withKernelSU": true,
     "toolchains": [
@@ -34,7 +35,7 @@
       "CLANG_TRIPLE": "aarch64-linux-gnu-",
       "LLVM": "1",
       "LLVM_IAS": "1",
-      "DEFCONFIG": "raviole_defconfig",
+      "DEFCONFIG": "ravioledefconfig",
       "TARGET": "Image"
     }
   }
