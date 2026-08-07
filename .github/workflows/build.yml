@@ -7,6 +7,7 @@ env:
   CCACHE_MAXSIZE: "3G"
   ANYKERNEL3_REPO: "https://github.com/osm0sis/AnyKernel3"
   ANYKERNEL3_BRANCH: "master"
+  ARCH: "arm64"                     # <-- defined globally to avoid lint warnings
   # Secrets as env for conditional steps
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -119,7 +120,6 @@ jobs:
         if: steps.cache-source.outputs.cache-hit == 'true'
         run: echo "Source restored from cache."
 
-      # ---- Validate that we have a proper kernel tree ----
       - name: "🔍 Verify kernel source"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
@@ -219,7 +219,6 @@ jobs:
           echo "TARGET=$TARGET" >> $GITHUB_ENV
 
           # Use ccache if available and not clean build
-          CC_PREFIX=""
           if command -v ccache >/dev/null && [ "${{ env.CLEAN_BUILD }}" != "true" ]; then
             export CCACHE_DIR="${{ env.CCACHE_DIR }}"
             export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
@@ -227,6 +226,7 @@ jobs:
             CC="ccache $CC"
           fi
 
+          # Build make arguments (excluding CC, LD, AR, etc. – we'll set them as env vars)
           args="-j$(nproc --all) -s"
           if [ -n "${{ env.OUT_DIR }}" ]; then
             mkdir -p $(pwd)/${{ env.OUT_DIR }}
@@ -236,11 +236,9 @@ jobs:
           [ -n "$CROSS_COMPILE" ] && args="$args CROSS_COMPILE=$CROSS_COMPILE"
           [ -n "$CLANG_TRIPLE" ] && args="$args CLANG_TRIPLE=$CLANG_TRIPLE"
           [ -n "$CROSS_COMPILE_COMPAT" ] && args="$args CROSS_COMPILE_ARM32=$CROSS_COMPILE_COMPAT"
-          [ -n "$AR" ] && args="$args AR=$AR"
-          [ -n "$CC" ] && args="$args CC=$CC"
-          [ -n "$LD" ] && args="$args LD=$LD"
-          [ -n "$LLVM" ] && args="$args LLVM=$LLVM"
-          [ -n "$LLVM_IAS" ] && args="$args LLVM_IAS=$LLVM_IAS"
+          # Do NOT add CC, LD, AR, NM, OBJCOPY, OBJDUMP, STRIP, LLVM, LLVM_IAS to args
+          # Instead, export them as environment variables in the build steps
+          # Also add TARGET if specified
           [ -n "$TARGET" ] && args="$args $TARGET"
 
           # Handle extraParams safely
@@ -249,6 +247,17 @@ jobs:
             extra_params=$(echo $extraParams | jq -r 'to_entries[]? | select(.value != "") | "\(.key)=\(.value)"' | tr "\n" " " | sed 's/ $//')
           fi
           echo "args=$args $extra_params" >> $GITHUB_OUTPUT
+
+          # Export toolchain variables for the build steps
+          echo "CC=$CC" >> $GITHUB_ENV
+          echo "LD=$LD" >> $GITHUB_ENV
+          echo "AR=$AR" >> $GITHUB_ENV
+          echo "NM=$NM" >> $GITHUB_ENV
+          echo "OBJCOPY=$OBJCOPY" >> $GITHUB_ENV
+          echo "OBJDUMP=$OBJDUMP" >> $GITHUB_ENV
+          echo "STRIP=$STRIP" >> $GITHUB_ENV
+          echo "LLVM=$LLVM" >> $GITHUB_ENV
+          echo "LLVM_IAS=$LLVM_IAS" >> $GITHUB_ENV
 
       - name: "🔀 Update KernelSU"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
