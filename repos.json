@@ -10,12 +10,12 @@
     "toolchains": [
       {
         "repo": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86",
-        "branch": "master-kernel-build-2024",
+        "branch": "master",
         "name": "clang"
       },
       {
         "repo": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
-        "branch": "main",
+        "branch": "master",
         "name": "gas"
       }
     ],
@@ -29,15 +29,13 @@
       "OBJDUMP": "llvm-objdump",
       "STRIP": "llvm-strip",
       "CROSS_COMPILE": "aarch64-linux-gnu-",
-      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabi-",
+      "CROSS_COMPILE_ARM32": "arm-linux-gnueabihf-",   // ← fixed
+      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabihf-",  // also fix this if present
       "CLANG_TRIPLE": "aarch64-linux-gnu-",
       "LLVM": "1",
       "LLVM_IAS": "1",
-      "DEFCONFIG": "gki_defconfig"
-    },
-    "extraParams": {
-      "KCFLAGS": "-O3 -pipe -march=armv8.2-a+crypto -mcpu=cortex-x1",
-      "KCPPFLAGS": "-O3"
+      "DEFCONFIG": "raviole_defconfig",
+      "TARGET": "Image"
     }
   }
 ]
