@@ -2,7 +2,7 @@
   {
     "kernelSource": {
       "name": "NetHunter-GS101-Android16-Pixel6Pro",
-      "repo": "https://android.googlesource.com/kernel/gs",
+      "repo": "https://android.googlesource.com/kernel/devices/google/raviole",
       "branch": "android-gs-raviole-6.1-android16",
       "device": "raven"
     },
