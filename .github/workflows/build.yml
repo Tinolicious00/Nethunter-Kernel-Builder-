@@ -172,7 +172,7 @@ jobs:
         run: echo "✅ Source restored from cache."
 
       # ------------------------------------------------------------
-      # IMPROVED KERNEL ROOT DETECTION (now searches for defconfig anywhere)
+      # ULTRA‑ROBUST KERNEL ROOT DETECTION
       # ------------------------------------------------------------
       - name: "📂 Find kernel root"
         id: find_root
@@ -198,40 +198,38 @@ jobs:
           DEFCONFIG_PATHS=$(find . -type f -name "$DEFCONFIG" 2>/dev/null || true)
           if [ -z "$DEFCONFIG_PATHS" ]; then
             echo "❌ Defconfig $DEFCONFIG not found anywhere in $(pwd)"
-            echo "Full directory tree:"
-            tree . || find . -type d | sort
+            echo "Full directory tree (max depth 4):"
+            find . -maxdepth 4 -type d | sort
+            echo "Searching for any file ending with 'defconfig':"
+            find . -name "*defconfig" | head -20
             exit 1
           fi
           echo "Found defconfig at:"
           echo "$DEFCONFIG_PATHS"
 
-          # For each match, determine the potential kernel root
+          # Determine the kernel root for each found path
           KERNEL_ROOT=""
           for path in $DEFCONFIG_PATHS; do
-            # The path should be something like ./common/arch/arm64/configs/ravioledefconfig
-            # We want the directory that contains 'arch/'
-            # So we go up until we find a directory that has arch/ and contains Makefile
-            # Start from the directory containing the defconfig
+            # The path is like ./some/dir/arch/arm64/configs/ravioledefconfig
+            # We want the directory that contains both arch/ and Makefile
+            # Go up until we find a directory that has arch/ and Makefile
             current_dir=$(dirname "$path")
             while [ "$current_dir" != "." ] && [ "$current_dir" != "/" ]; do
-              # Check if this directory has arch/ and Makefile
               if [ -d "$current_dir/arch" ] && [ -f "$current_dir/Makefile" ]; then
-                # Also ensure arch/$ARCH/configs/defconfig exists (it should, since we found it)
-                if [ -f "$current_dir/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
-                  KERNEL_ROOT="$current_dir"
-                  break
-                fi
+                KERNEL_ROOT="$current_dir"
+                break
               fi
               current_dir=$(dirname "$current_dir")
             done
             if [ -n "$KERNEL_ROOT" ]; then
+              echo "Found root for defconfig at $path: $KERNEL_ROOT"
               break
             fi
           done
 
           # If still not found, try a simpler approach: look for any directory containing both Makefile and arch/$ARCH/configs/
           if [ -z "$KERNEL_ROOT" ]; then
-            echo "Falling back to searching for directories with Makefile and arch/"
+            echo "Falling back to searching for directories with Makefile and arch/${{ env.ARCH }}/configs/"
             for dir in $(find . -maxdepth 4 -type f -name Makefile -exec dirname {} \; | sort -u); do
               if [ -d "$dir/arch/${{ env.ARCH }}/configs" ] && [ -f "$dir/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
                 KERNEL_ROOT="$dir"
