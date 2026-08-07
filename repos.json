@@ -1,38 +1,43 @@
 [
   {
     "kernelSource": {
-      "name": "NetHunter-Pixel6Pro-Android16",
-      "repo": "https://googlesource.com",
-      "branch": "common-android14-6.1",
+      "name": "NetHunter-GS101-Android16-Pixel6Pro",
+      "repo": "https://github.com/fillwithjoy1/pixel-6-kernel",
+      "branch": "main",
       "device": "raven"
     },
     "withKernelSU": true,
     "toolchains": [
       {
-        "repo": "https://googlesource.com",
-        "branch": "main",
-        "name": "gas"
+        "repo": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86",
+        "branch": "master-kernel-build-2024",
+        "name": "clang"
       },
       {
-        "repo": "https://github.com",
-        "branch": "master",
-        "name": "clang"
+        "repo": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
+        "branch": "main",
+        "name": "gas"
       }
     ],
     "params": {
       "ARCH": "arm64",
-      "CROSS_COMPILE": "aarch64-linux-gnu-",
-      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabi-",
       "CC": "clang",
+      "LD": "ld.lld",
       "AR": "llvm-ar",
       "NM": "llvm-nm",
       "OBJCOPY": "llvm-objcopy",
       "OBJDUMP": "llvm-objdump",
       "STRIP": "llvm-strip",
-      "LLVM": "1"
+      "CROSS_COMPILE": "aarch64-linux-gnu-",
+      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabi-",
+      "CLANG_TRIPLE": "aarch64-linux-gnu-",
+      "LLVM": "1",
+      "LLVM_IAS": "1",
+      "DEFCONFIG": "gki_defconfig"
     },
     "extraParams": {
-      "DEFCONFIG": "gki_defconfig"
+      "KCFLAGS": "-O3 -pipe -march=armv8.2-a+crypto -mcpu=cortex-x1",
+      "KCPPFLAGS": "-O3"
     }
   }
 ]
