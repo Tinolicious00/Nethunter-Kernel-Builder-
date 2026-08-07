@@ -81,7 +81,7 @@ jobs:
       CLEAN_BUILD: ${{ github.event.inputs.clean_build == 'true' }}
       APPLY_PATCHES: ${{ github.event.inputs.apply_patches == 'true' }}
       IS_MANIFEST: ${{ matrix.repos.kernelSource.manifest || false }}
-      # Re‑declare for lint
+      # Re‑declare to avoid lint warnings (they are already global)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -124,7 +124,6 @@ jobs:
           set -euo pipefail
           curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
           chmod a+x /usr/local/bin/repo
-          # Verify repo works
           repo --version
           echo "✅ repo installed."
 
@@ -182,7 +181,7 @@ jobs:
         run: echo "✅ Source restored from cache."
 
       # ------------------------------------------------------------
-      # KERNEL ROOT DETECTION
+      # IMPROVED KERNEL ROOT DETECTION
       # ------------------------------------------------------------
       - name: "📂 Find kernel root"
         id: find_root
@@ -192,30 +191,56 @@ jobs:
           echo "Listing contents of $(pwd):"
           ls -la
 
-          # Define candidates: common, kernel, gs, then search deeper
-          CANDIDATES=("common" "kernel" "gs")
+          DEFCONFIG="${{ env.DEFCONFIG_NAME }}"
+          echo "Looking for defconfig: $DEFCONFIG"
+
+          # Candidates: kernel, common, gs
+          CANDIDATES=("kernel" "common" "gs")
           KERNEL_ROOT=""
           for candidate in "${CANDIDATES[@]}"; do
-            if [ -d "$candidate" ] && [ -f "$candidate/Makefile" ] && [ -f "$candidate/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
-              KERNEL_ROOT="$candidate"
-              break
+            if [ -d "$candidate" ] && [ -f "$candidate/Makefile" ]; then
+              # Check if defconfig exists in the usual place
+              if [ -f "$candidate/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
+                KERNEL_ROOT="$candidate"
+                echo "Found kernel root in '$candidate' (Makefile + defconfig)"
+                break
+              else
+                echo "Candidate '$candidate' has Makefile but not defconfig, searching deeper..."
+                # Look for defconfig anywhere under this candidate
+                DEFCONFIG_PATH=$(find "$candidate" -path "*/arch/${{ env.ARCH }}/configs/$DEFCONFIG" | head -1)
+                if [ -n "$DEFCONFIG_PATH" ]; then
+                  # The root is the directory that contains arch/
+                  KERNEL_ROOT=$(dirname "$(dirname "$(dirname "$DEFCONFIG_PATH")")")
+                  echo "Found defconfig at $DEFCONFIG_PATH, root set to $KERNEL_ROOT"
+                  break
+                fi
+              fi
             fi
           done
 
           if [ -z "$KERNEL_ROOT" ]; then
-            # Search for any directory containing both Makefile and the defconfig
+            # Last resort: find any directory with Makefile and arch/
             for dir in $(find . -maxdepth 3 -type f -name Makefile -exec dirname {} \; | sort -u); do
-              if [ -f "$dir/arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}" ]; then
-                KERNEL_ROOT="$dir"
-                break
+              if [ -d "$dir/arch/${{ env.ARCH }}/configs" ]; then
+                if [ -f "$dir/arch/${{ env.ARCH }}/configs/$DEFCONFIG" ]; then
+                  KERNEL_ROOT="$dir"
+                  echo "Found kernel root via fallback: $dir"
+                  break
+                else
+                  echo "Directory $dir has arch/ but not $DEFCONFIG, skipping."
+                fi
               fi
             done
           fi
 
           if [ -z "$KERNEL_ROOT" ]; then
-            echo "❌ Could not find kernel source (no directory with Makefile and ${{ env.DEFCONFIG_NAME }})"
-            echo "Directory structure:"
+            echo "❌ Could not find kernel source (no directory with Makefile and $DEFCONFIG)"
+            echo "Directory structure (max depth 3):"
             find . -maxdepth 3 -type d | sort
+            echo "Searching for any Makefile:"
+            find . -name Makefile
+            echo "Searching for defconfig:"
+            find . -name "$DEFCONFIG"
             exit 1
           fi
 
@@ -250,7 +275,6 @@ jobs:
           if [ -n "${{ env.RELEASE_TAG }}" ]; then
             VERSION="${{ env.RELEASE_TAG }}"
           else
-            # Try git describe, fallback to commit hash + date
             if git describe --always --tags --dirty >/dev/null 2>&1; then
               VERSION=$(git describe --always --tags --dirty)
             else
@@ -449,7 +473,6 @@ jobs:
           CONFIG_CRYPTO_USER_API_AEAD=y
           CONFIG_CRYPTO_USER_API_RNG=y
           EOF
-          # Resolve dependencies
           make ARCH=${{ env.ARCH }} O=$(pwd) olddefconfig
           echo "✅ NetHunter configs injected."
 
@@ -475,15 +498,10 @@ jobs:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
           set -euo pipefail
-          # Record start time
           START=$(date +%s)
-          # Build Image
           time make ${args}
-          # Build modules
           time make ${args} modules
-          # Build dtbs (optional)
           time make ${args} dtbs || echo "No DTBs to build"
-          # Record end time
           END=$(date +%s)
           DURATION=$((END - START))
           echo "BUILD_DURATION=$DURATION" >> $GITHUB_ENV
@@ -545,15 +563,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p debug
-          # Copy kernel config and logs
           if [ -f "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/.config" ]; then
             cp "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/.config" debug/
           fi
-          # Find and copy any log files
           find ./${{ env.kernelDir }} -name "*.log" -exec cp {} debug/ \; 2>/dev/null || true
-          # Save directory tree
           tree ./${{ env.kernelDir }} > debug/tree.txt 2>/dev/null || ls -laR ./${{ env.kernelDir }} > debug/tree.txt
-          # Compress
           tar -czf debug.tar.gz debug/
         continue-on-error: true
 
@@ -580,9 +594,7 @@ jobs:
           echo "- **Image size**: $(du -h ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image | cut -f1)" >> $GITHUB_STEP_SUMMARY
           MOD_COUNT=$(find ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }} -name "*.ko" | wc -l)
           echo "- **Modules count**: $MOD_COUNT" >> $GITHUB_STEP_SUMMARY
-          # Build duration from env set earlier
           echo "- **Build duration**: ${BUILD_DURATION:-unknown} seconds" >> $GITHUB_STEP_SUMMARY
-          # ccache stats
           ccache -s >> $GITHUB_STEP_SUMMARY
 
       # ------------------------------------------------------------
