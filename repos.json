@@ -1,19 +1,20 @@
-[  {
+[
+  {
     "kernelSource": {
-      "name": "MikasaNethunter",
-      "repo": "https://github.com/noophyy/mikasa_kernel_realme2_c1.git",
-      "branch": "Light",
-      "device": "mikasa"
+      "name": "NetHunter-Pixel6Pro-Android16",
+      "repo": "https://googlesource.com",
+      "branch": "common-android14-6.1",
+      "device": "raven"
     },
-    "withKernelSU": false,
+    "withKernelSU": true,
     "toolchains": [
       {
-        "repo": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
-        "branch": "master",
+        "repo": "https://googlesource.com",
+        "branch": "main",
         "name": "gas"
       },
       {
-        "repo": "https://github.com/kdrag0n/proton-clang.git",
+        "repo": "https://github.com",
         "branch": "master",
         "name": "clang"
       }
@@ -21,18 +22,17 @@
     "params": {
       "ARCH": "arm64",
       "CROSS_COMPILE": "aarch64-linux-gnu-",
-      "CROSS_COMPILE_ARM32": "arm-linux-gnueabi-",
       "CROSS_COMPILE_COMPAT": "arm-linux-gnueabi-",
-      "CLANG_TRIPLE": "aarch64-linux-gnu-",
+      "CC": "clang",
       "AR": "llvm-ar",
+      "NM": "llvm-nm",
+      "OBJCOPY": "llvm-objcopy",
       "OBJDUMP": "llvm-objdump",
       "STRIP": "llvm-strip",
-      "OBJCOPY": "llvm-objcopy",
-      "NM": "llvm-nm",
-      "CC": "clang"
+      "LLVM": "1"
     },
     "extraParams": {
-      "KEEP": ""
+      "DEFCONFIG": "gki_defconfig"
     }
   }
 ]
