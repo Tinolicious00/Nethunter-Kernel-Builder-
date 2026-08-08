@@ -35,7 +35,7 @@
       "CLANG_TRIPLE": "aarch64-linux-gnu-",
       "LLVM": "1",
       "LLVM_IAS": "1",
-      "DEFCONFIG": "ravioled_efconfig",
+      "DEFCONFIG": "raviole_defconfig",
       "TARGET": "Image"
     }
   }
