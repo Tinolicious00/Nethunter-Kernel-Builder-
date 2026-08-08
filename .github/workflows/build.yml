@@ -175,7 +175,18 @@ jobs:
         run: echo "✅ Source restored from cache."
 
       # ------------------------------------------------------------
-      # ULTRA‑ROBUST KERNEL ROOT DETECTION
+      # NEW: List available defconfigs to verify the correct name
+      # ------------------------------------------------------------
+      - name: "📋 List available defconfigs"
+        working-directory: ./${{ env.kernelDir }}
+        run: |
+          set -euo pipefail
+          echo "Available defconfigs for arm64:"
+          find . -path "*/arch/arm64/configs/*_defconfig" -type f | sort
+          echo "Defconfig we will use: ${{ env.DEFCONFIG_NAME }}"
+
+      # ------------------------------------------------------------
+      # ULTRA‑ROBUST KERNEL ROOT DETECTION (fixed)
       # ------------------------------------------------------------
       - name: "📂 Find kernel root"
         id: find_root
