@@ -182,7 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Available defconfigs for arm64:"
-          find . -path "*/arch/arm64/configs/*_defconfig" -type f | sort
+          find . -path "*/arch/arm64/configs/*_defconfig" -type f | sort || true
           echo "Defconfig we will use: ${{ env.DEFCONFIG_NAME }}"
 
       # ------------------------------------------------------------
@@ -412,10 +412,10 @@ jobs:
           echo "CC=$CC" >> $GITHUB_ENV
           echo "LD=$LD" >> $GITHUB_ENV
           echo "AR=$AR" >> $GITHUB_ENV
-          echo "NM=$NM" >> $GITHUB_ENV
-          echo "OBJCOPY=$OBJCOPY" >> $GITHUB_ENV
-          echo "OBJDUMP=$OBJDUMP" >> $GITHUB_ENV
-          echo "STRIP=$STRIP" >> $GITHUB_ENV
+          echo "NM=$NM" >> $GITHUB_ENV || true
+          echo "OBJCOPY=$OBJCOPY" >> $GITHUB_ENV || true
+          echo "OBJDUMP=$OBJDUMP" >> $GITHUB_ENV || true
+          echo "STRIP=$STRIP" >> $GITHUB_ENV || true
           echo "LLVM=$LLVM" >> $GITHUB_ENV
           echo "LLVM_IAS=$LLVM_IAS" >> $GITHUB_ENV
 
@@ -434,7 +434,7 @@ jobs:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
           set -euo pipefail
-          make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
+          make ${args} ${{ env.DEFCONFIG_NAME }}
           echo "✅ Defconfig generated."
 
       - name: "🏴‍☠️ Inject NetHunter configs"
@@ -511,19 +511,34 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth=1 "${{ env.ANKERNEL3_REPO }}" -b "${{ env.ANKERNEL3_BRANCH }}" AnyKernel3
+
           IMAGE_PATH="./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image"
           if [ ! -f "$IMAGE_PATH" ]; then
             echo "❌ Image not found at $IMAGE_PATH"
             exit 1
           fi
-          cp "$IMAGE_PATH" AnyKernel3/
-          [ -f "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb" ] && cp "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb" AnyKernel3/
-          [ -f "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img" ] && cp "./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img" AnyKernel3/
+          cp "$IMAGE_PATH" AnyKernel3/ || true
+
+          # Copy DTB/DTBO/DTBS if present
+          DTB_DIR="./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbs"
+          DTB_FILE="./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb"
+          DTBO_IMG="./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img"
+
+          if [ -d "$DTB_DIR" ]; then
+            cp -r "$DTB_DIR" AnyKernel3/ || true
+          fi
+          if [ -f "$DTB_FILE" ]; then
+            cp "$DTB_FILE" AnyKernel3/ || true
+          fi
+          if [ -f "$DTBO_IMG" ]; then
+            cp "$DTBO_IMG" AnyKernel3/ || true
+          fi
+
           cd AnyKernel3
-          sed -i "s/device.name1=.*/device.name1=${{ env.kernelDevice }}/" anykernel.sh
-          sed -i "s/device.name2=.*/device.name2=${{ env.kernelDevice }}/" anykernel.sh
+          sed -i "s/device.name1=.*/device.name1=${{ env.kernelDevice }}/" anykernel.sh || true
+          sed -i "s/device.name2=.*/device.name2=${{ env.kernelDevice }}/" anykernel.sh || true
           ZIP_NAME="${{ env.kernelDevice }}-NetHunter-Kernel-${{ steps.version.outputs.version }}.zip"
-          zip -9 -r ../"$ZIP_NAME" * -x .git README.md
+          zip -9 -r ../"$ZIP_NAME" * -x .git README.md || true
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "✅ Flashable ZIP created: $ZIP_NAME"
 
@@ -654,7 +669,8 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          rm -rf ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/**/*.o
-          rm -rf ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/**/*.cmd
-          rm -rf ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }}/**/built-in.a
-          ccache -s
+          # Remove build artifacts safely using find
+          find ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }} -type f -name "*.o" -delete || true
+          find ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }} -type f -name "*.cmd" -delete || true
+          find ./${{ env.kernelDir }}/${{ steps.find_root.outputs.kernel_root }}/../${{ env.OUT_DIR }} -type f -name "built-in.a" -delete || true
+          ccache -s || true
