@@ -74,13 +74,8 @@ jobs:
       kernelBranch: ${{ matrix.repos.kernelSource.branch }}
       kernelDevice: ${{ matrix.repos.kernelSource.device }}
 
-      # ------------------------------------------------------------
-      # FIX: Always build the defconfig name with an underscore.
-      # If you need a completely custom name (like gki_defconfig),
-      # set params.DEFCONFIG correctly in repos.json, or adjust
-      # the device name accordingly.
-      # ------------------------------------------------------------
-      DEFCONFIG_NAME: ${{ format('{0}_defconfig', matrix.repos.kernelSource.device) }}
+      # Use custom defconfig from repos.json if provided, else device_defconfig
+      DEFCONFIG_NAME: ${{ matrix.repos.params.DEFCONFIG || format('{0}_defconfig', matrix.repos.kernelSource.device) }}
 
       withKernelSU: ${{ matrix.repos.withKernelSU }}
       BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
